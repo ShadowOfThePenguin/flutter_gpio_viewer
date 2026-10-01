@@ -55,6 +55,8 @@ If the devices can't be opened, the app shows the error and a Retry button.
 
 ## Development
 
+Requires Dart SDK 3.12.0 or newer (Flutter 3.44.0+).
+
 ```sh
 flutter pub get
 flutter analyze
