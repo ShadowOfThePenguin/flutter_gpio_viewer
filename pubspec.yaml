@@ -1,14 +1,15 @@
 name: flutter_gpio_display
-description: "A new Flutter project."
+description: "Lists all GPIO chips and lines on a single-board computer, using flutter_gpiod. Runs on flutter-pi."
 publish_to: 'none'
 version: 0.1.0+1
 
 environment:
-  sdk: ^3.13.4
+  sdk: ^3.12.0
 
 dependencies:
   flutter:
     sdk: flutter
+  flutter_gpiod: ^0.6.0
 
 dev_dependencies:
   flutter_test:
