@@ -5,10 +5,16 @@ every GPIO chip (`/dev/gpiochip*`) and each line on it. It is built to run on
 [flutter-pi](https://github.com/ardera/flutter-pi) and reads GPIO through
 [flutter_gpiod](https://pub.dev/packages/flutter_gpiod).
 
-For each chip it shows the device name, label, and how many lines are in use.
-Expand a chip to see each line's offset, name, consumer, direction, output
-mode, bias and active state. You can filter by line number, name or consumer,
-show only lines that are in use, and refresh to read the current state again.
+The app is display-only, for screens with no mouse, keyboard or touch input.
+Every chip appears with its name, label and how many lines are in use, followed
+by a compact grid of all its lines. Each line shows its offset, name, consumer
+(or "free"), and flags for direction (IN/OUT), output mode (OD/OS), bias
+(PU/PD) and active-low (AL). Lines in use are highlighted.
+
+The data refreshes every 2 seconds. If everything doesn't fit on the screen,
+the view scrolls slowly to the bottom, pauses, and starts again from the top.
+If the GPIO devices can't be opened, the error is shown and the app keeps
+retrying.
 
 ## Project layout
 
@@ -51,7 +57,7 @@ in the `gpio` group:
 sudo usermod -aG gpio $USER
 ```
 
-If the devices can't be opened, the app shows the error and a Retry button.
+If the devices can't be opened, the app shows the error and keeps retrying.
 
 ## Development
 
