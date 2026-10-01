@@ -1,116 +1,165 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_gpiod/flutter_gpiod.dart';
 
 import 'gpio_source.dart';
 
-/// Lists every GPIO chip on the system and, under each chip, all its lines.
+/// Display-only view of every GPIO chip on the system and all its lines.
+///
+/// Meant for screens without mouse, keyboard or touch: everything is shown
+/// at once, the data refreshes itself every [refreshInterval], and when the
+/// content is taller than the screen it scrolls itself up and down.
 class GpioViewerPage extends StatefulWidget {
-  const GpioViewerPage({super.key, required this.loader});
+  const GpioViewerPage({
+    super.key,
+    required this.loader,
+    this.refreshInterval = const Duration(seconds: 2),
+    this.autoScroll = true,
+  });
 
   final GpioLoader loader;
+
+  /// How often to re-read the chips. Null disables automatic refreshing.
+  final Duration? refreshInterval;
+
+  /// Whether to scroll through content that doesn't fit on screen.
+  final bool autoScroll;
 
   @override
   State<GpioViewerPage> createState() => _GpioViewerPageState();
 }
 
 class _GpioViewerPageState extends State<GpioViewerPage> {
-  late Future<List<GpioChipSnapshot>> _chips;
-  String _query = '';
-  bool _usedOnly = false;
+  List<GpioChipSnapshot>? _chips;
+  Object? _error;
+  DateTime? _updatedAt;
+  Timer? _refreshTimer;
+  bool _loading = false;
 
   @override
   void initState() {
     super.initState();
-    _chips = widget.loader();
+    _load();
+    final interval = widget.refreshInterval;
+    if (interval != null) {
+      _refreshTimer = Timer.periodic(interval, (_) => _load());
+    }
   }
 
-  void _refresh() {
-    setState(() => _chips = widget.loader());
+  @override
+  void dispose() {
+    _refreshTimer?.cancel();
+    super.dispose();
   }
 
-  bool _matches(GpioLineSnapshot line) {
-    if (_usedOnly && !line.isUsed) return false;
-    if (_query.isEmpty) return true;
-    final q = _query.toLowerCase();
-    return line.offset.toString() == q ||
-        (line.name?.toLowerCase().contains(q) ?? false) ||
-        (line.consumer?.toLowerCase().contains(q) ?? false);
+  Future<void> _load() async {
+    if (_loading) return;
+    _loading = true;
+    try {
+      final chips = await widget.loader();
+      if (!mounted) return;
+      setState(() {
+        _chips = chips;
+        _error = null;
+        _updatedAt = DateTime.now();
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _error = e);
+    } finally {
+      _loading = false;
+    }
   }
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final chips = _chips;
+
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('GPIO Viewer'),
-        actions: [
-          IconButton(
-            tooltip: 'Refresh',
-            icon: const Icon(Icons.refresh),
-            onPressed: _refresh,
-          ),
-        ],
-      ),
-      body: Column(
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
-            child: Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    decoration: const InputDecoration(
-                      prefixIcon: Icon(Icons.search),
-                      hintText: 'Filter by line number, name or consumer',
-                      isDense: true,
+      body: SafeArea(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _Header(chips: chips, updatedAt: _updatedAt),
+            Expanded(
+              child: _error != null
+                  ? _Message(
+                      icon: Icons.error_outline,
+                      title: 'Could not read GPIO chips',
+                      detail:
+                          '$_error\n\n'
+                          'Make sure /dev/gpiochip* exists and this user can '
+                          'access it (e.g. is in the "gpio" group). '
+                          'Retrying automatically.',
+                    )
+                  : chips == null
+                  ? const Center(child: CircularProgressIndicator())
+                  : chips.isEmpty
+                  ? const _Message(
+                      icon: Icons.memory,
+                      title: 'No GPIO chips found',
+                      detail: 'No /dev/gpiochip* devices were found.',
+                    )
+                  : _AutoScroll(
+                      enabled: widget.autoScroll,
+                      child: Padding(
+                        padding: const EdgeInsets.all(8),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            for (final chip in chips) _ChipSection(chip: chip),
+                          ],
+                        ),
+                      ),
                     ),
-                    onChanged: (v) => setState(() => _query = v.trim()),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                FilterChip(
-                  label: const Text('Used only'),
-                  selected: _usedOnly,
-                  onSelected: (v) => setState(() => _usedOnly = v),
-                ),
-              ],
+            ),
+            if (_error == null && chips != null && chips.isNotEmpty)
+              _Legend(style: theme.textTheme.labelSmall),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _Header extends StatelessWidget {
+  const _Header({required this.chips, required this.updatedAt});
+
+  final List<GpioChipSnapshot>? chips;
+  final DateTime? updatedAt;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final chips = this.chips ?? const [];
+    final lineCount = chips.fold<int>(0, (n, c) => n + c.lines.length);
+    final usedCount = chips.fold<int>(0, (n, c) => n + c.usedLineCount);
+    final t = updatedAt;
+    String two(int v) => v.toString().padLeft(2, '0');
+
+    return Container(
+      color: theme.colorScheme.primaryContainer,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      child: Row(
+        children: [
+          Text(
+            'GPIO Viewer',
+            style: theme.textTheme.titleLarge?.copyWith(
+              color: theme.colorScheme.onPrimaryContainer,
             ),
           ),
+          const SizedBox(width: 16),
           Expanded(
-            child: FutureBuilder<List<GpioChipSnapshot>>(
-              future: _chips,
-              builder: (context, snapshot) {
-                if (snapshot.connectionState != ConnectionState.done) {
-                  return const Center(child: CircularProgressIndicator());
-                }
-                if (snapshot.hasError) {
-                  return _Message(
-                    icon: Icons.error_outline,
-                    title: 'Could not read GPIO chips',
-                    detail: '${snapshot.error}\n\n'
-                        'Make sure /dev/gpiochip* exists and this user can '
-                        'access it (e.g. is in the "gpio" group).',
-                    onRetry: _refresh,
-                  );
-                }
-                final chips = snapshot.data!;
-                if (chips.isEmpty) {
-                  return _Message(
-                    icon: Icons.memory,
-                    title: 'No GPIO chips found',
-                    detail: 'No /dev/gpiochip* devices were found.',
-                    onRetry: _refresh,
-                  );
-                }
-                return ListView(
-                  children: [
-                    for (final chip in chips)
-                      _ChipTile(
-                        chip: chip,
-                        lines: chip.lines.where(_matches).toList(),
-                      ),
-                  ],
-                );
-              },
+            child: Text(
+              '${chips.length} chips · $lineCount lines · $usedCount in use'
+              '${t == null ? '' : ' · updated ${two(t.hour)}:${two(t.minute)}:${two(t.second)}'}',
+              textAlign: TextAlign.end,
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: theme.colorScheme.onPrimaryContainer,
+              ),
             ),
           ),
         ],
@@ -119,37 +168,59 @@ class _GpioViewerPageState extends State<GpioViewerPage> {
   }
 }
 
-class _ChipTile extends StatelessWidget {
-  const _ChipTile({required this.chip, required this.lines});
+class _ChipSection extends StatelessWidget {
+  const _ChipSection({required this.chip});
+
+  static const _minCellWidth = 190.0;
+  static const _spacing = 4.0;
 
   final GpioChipSnapshot chip;
-  final List<GpioLineSnapshot> lines;
 
   @override
   Widget build(BuildContext context) {
-    return Card(
-      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      clipBehavior: Clip.antiAlias,
-      child: ExpansionTile(
-        key: PageStorageKey('chip-${chip.index}'),
-        leading: const Icon(Icons.memory),
-        title: Text('${chip.name}  ·  ${chip.label}'),
-        subtitle: Text(
-          '${chip.lines.length} lines, ${chip.usedLineCount} in use'
-          '${lines.length != chip.lines.length ? ', ${lines.length} shown' : ''}',
-        ),
+    final theme = Theme.of(context);
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          if (lines.isEmpty)
-            const ListTile(title: Text('No lines match the filter')),
-          for (final line in lines) _LineTile(line: line),
+          Padding(
+            padding: const EdgeInsets.only(bottom: 4),
+            child: Text(
+              '${chip.name} · ${chip.label} · '
+              '${chip.lines.length} lines, ${chip.usedLineCount} in use',
+              style: theme.textTheme.titleSmall,
+            ),
+          ),
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final columns = (constraints.maxWidth / _minCellWidth)
+                  .floor()
+                  .clamp(1, 1 << 20);
+              final cellWidth =
+                  (constraints.maxWidth - _spacing * (columns - 1)) / columns;
+              return Wrap(
+                spacing: _spacing,
+                runSpacing: _spacing,
+                children: [
+                  for (final line in chip.lines)
+                    SizedBox(
+                      width: cellWidth,
+                      child: _LineCell(line: line),
+                    ),
+                ],
+              );
+            },
+          ),
         ],
       ),
     );
   }
 }
 
-class _LineTile extends StatelessWidget {
-  const _LineTile({required this.line});
+class _LineCell extends StatelessWidget {
+  const _LineCell({required this.line});
 
   final GpioLineSnapshot line;
 
@@ -157,64 +228,156 @@ class _LineTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
+    final hasName = line.name?.isNotEmpty == true;
+    final fg = line.isUsed ? scheme.onPrimaryContainer : scheme.onSurface;
+    final small = theme.textTheme.labelSmall?.copyWith(color: fg);
 
-    return ListTile(
-      dense: true,
-      leading: CircleAvatar(
-        radius: 16,
-        backgroundColor:
-            line.isUsed ? scheme.primaryContainer : scheme.surfaceContainerHighest,
-        child: Text(
-          '${line.offset}',
-          style: theme.textTheme.labelMedium,
-        ),
+    final flags = [
+      line.direction == LineDirection.output ? 'OUT' : 'IN',
+      if (line.outputMode == OutputMode.openDrain) 'OD',
+      if (line.outputMode == OutputMode.openSource) 'OS',
+      if (line.bias == Bias.pullUp) 'PU',
+      if (line.bias == Bias.pullDown) 'PD',
+      if (line.activeState == ActiveState.low) 'AL',
+    ];
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+      decoration: BoxDecoration(
+        color: line.isUsed
+            ? scheme.primaryContainer
+            : scheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(4),
       ),
-      title: Text(
-        line.name?.isNotEmpty == true ? line.name! : '(unnamed)',
-        style: line.name?.isNotEmpty == true
-            ? null
-            : TextStyle(color: theme.disabledColor),
-      ),
-      subtitle: Text(
-        line.isUsed
-            ? 'Used by ${line.consumer?.isNotEmpty == true ? line.consumer : 'kernel / unknown'}'
-            : 'Free',
-      ),
-      trailing: Wrap(
-        spacing: 4,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _Tag(line.direction == LineDirection.output ? 'OUT' : 'IN'),
-          if (line.outputMode == OutputMode.openDrain) const _Tag('open-drain'),
-          if (line.outputMode == OutputMode.openSource)
-            const _Tag('open-source'),
-          if (line.bias == Bias.pullUp) const _Tag('pull-up'),
-          if (line.bias == Bias.pullDown) const _Tag('pull-down'),
-          if (line.bias == Bias.disable) const _Tag('no bias'),
-          if (line.activeState == ActiveState.low) const _Tag('active-low'),
+          Row(
+            children: [
+              SizedBox(
+                width: 28,
+                child: Text(
+                  '${line.offset}',
+                  style: theme.textTheme.labelMedium?.copyWith(
+                    color: fg,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+              Expanded(
+                child: Text(
+                  hasName ? line.name! : '-',
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.labelMedium?.copyWith(
+                    color: hasName ? fg : fg.withValues(alpha: 0.5),
+                  ),
+                ),
+              ),
+              Text(flags.join(' '), style: small),
+            ],
+          ),
+          Text(
+            line.isUsed
+                ? (line.consumer?.isNotEmpty == true
+                      ? line.consumer!
+                      : 'used (kernel)')
+                : 'free',
+            overflow: TextOverflow.ellipsis,
+            style: small?.copyWith(color: fg.withValues(alpha: 0.75)),
+          ),
         ],
       ),
     );
   }
 }
 
-class _Tag extends StatelessWidget {
-  const _Tag(this.text);
+class _Legend extends StatelessWidget {
+  const _Legend({this.style});
 
-  final String text;
+  final TextStyle? style;
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-      decoration: BoxDecoration(
-        color: scheme.secondaryContainer,
-        borderRadius: BorderRadius.circular(4),
-      ),
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
       child: Text(
-        text,
-        style: TextStyle(fontSize: 11, color: scheme.onSecondaryContainer),
+        'IN/OUT direction · OD open-drain · OS open-source · '
+        'PU pull-up · PD pull-down · AL active-low · highlighted = in use',
+        style: style,
+        textAlign: TextAlign.center,
       ),
+    );
+  }
+}
+
+/// Slowly scrolls [child] to the bottom and back to the top when it is taller
+/// than the available space. Does nothing when everything fits.
+class _AutoScroll extends StatefulWidget {
+  const _AutoScroll({required this.child, required this.enabled});
+
+  final Widget child;
+  final bool enabled;
+
+  @override
+  State<_AutoScroll> createState() => _AutoScrollState();
+}
+
+class _AutoScrollState extends State<_AutoScroll> {
+  static const _pixelsPerSecond = 40.0;
+  static const _pause = Duration(seconds: 4);
+
+  final _controller = ScrollController();
+  bool _running = false;
+  bool _disposed = false;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.enabled) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _run());
+    }
+  }
+
+  @override
+  void dispose() {
+    _disposed = true;
+    _controller.dispose();
+    super.dispose();
+  }
+
+  Future<void> _run() async {
+    if (_running) return;
+    _running = true;
+    while (!_disposed) {
+      await Future<void>.delayed(_pause);
+      if (_disposed || !_controller.hasClients) continue;
+
+      final extent = _controller.position.maxScrollExtent;
+      if (extent <= 0) continue;
+
+      final remaining = extent - _controller.offset;
+      if (remaining > 0) {
+        await _controller.animateTo(
+          extent,
+          duration: Duration(
+            milliseconds: (remaining / _pixelsPerSecond * 1000).round(),
+          ),
+          curve: Curves.linear,
+        );
+      }
+      if (_disposed) break;
+      await Future<void>.delayed(_pause);
+      if (_disposed || !_controller.hasClients) continue;
+      _controller.jumpTo(0);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SingleChildScrollView(
+      controller: _controller,
+      physics: const NeverScrollableScrollPhysics(),
+      child: widget.child,
     );
   }
 }
@@ -224,13 +387,11 @@ class _Message extends StatelessWidget {
     required this.icon,
     required this.title,
     required this.detail,
-    required this.onRetry,
   });
 
   final IconData icon;
   final String title;
   final String detail;
-  final VoidCallback onRetry;
 
   @override
   Widget build(BuildContext context) {
@@ -245,12 +406,6 @@ class _Message extends StatelessWidget {
             Text(title, style: Theme.of(context).textTheme.titleLarge),
             const SizedBox(height: 8),
             Text(detail, textAlign: TextAlign.center),
-            const SizedBox(height: 16),
-            FilledButton.icon(
-              onPressed: onRetry,
-              icon: const Icon(Icons.refresh),
-              label: const Text('Retry'),
-            ),
           ],
         ),
       ),
